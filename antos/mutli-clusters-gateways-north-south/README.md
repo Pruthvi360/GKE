@@ -72,3 +72,245 @@ gcloud container fleet multi-cluster-services enable \
 gcloud container fleet multi-cluster-services describe --project=${PROJECT_ID}
 ```
 # Install Gateway API CRDs and enable the Multi-cluster Gateway (MCG) controller
+![image](https://github.com/Pruthvi360/GKE/assets/107435692/b1caa4d8-cee1-4fea-914e-f088e98bed3c)
+# Deploy Gateway resources into the gke-west-1 cluster:
+```
+kubectl kustomize "github.com/kubernetes-sigs/gateway-api/config/crd?ref=v0.5.0" \
+| kubectl apply -f - --context=gke-west-1
+```
+# Enable the Multi-cluster Gateway controller for the gke-west-1 cluster:
+```
+gcloud container fleet ingress enable \
+  --config-membership=gke-west-1 \
+  --project=${PROJECT_ID} \
+  --location=us-west2
+```
+# Confirm that the global Gateway controller is enabled for the registered clusters:
+```
+gcloud container fleet ingress describe --project=${PROJECT_ID}
+```
+# Grant Identity and Access Management (IAM) permissions required by the Gateway controller:
+```
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+  --member "serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-multiclusteringress.iam.gserviceaccount.com" \
+  --role "roles/container.admin" \
+  --project=${PROJECT_ID}
+```
+# List the GatewayClasses:
+```
+kubectl get gatewayclasses --context=gke-west-1
+```
+# Task 5. Deploy the demo application
+# Create the store Deployment and Namespace in the gke-east-1 and gke-west-2. The config cluster can also host workloads, but in this lab, you only run the Gateway controllers and configuration on it:
+```
+cat <<EOF > store-deployment.yaml
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: store
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: store
+  namespace: store
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: store
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: store
+        version: v1
+    spec:
+      containers:
+      - name: whereami
+        image: gcr.io/google-samples/whereami:v1.2.1
+        ports:
+          - containerPort: 8080
+EOF
+kubectl apply -f store-deployment.yaml --context=gke-west-2
+kubectl apply -f store-deployment.yaml --context=gke-east-1
+```
+# Create the Service and ServiceExports for the gke-west-2 cluster:
+```
+cat <<EOF > store-west-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: store
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-west-2
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store-west-2
+  namespace: store
+EOF
+kubectl apply -f store-west-service.yaml --context=gke-west-2
+```
+# Create the Service and ServiceExports for the gke-east-1 cluster:
+```
+cat <<EOF > store-east-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store
+  namespace: store
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store-east-1
+  namespace: store
+spec:
+  selector:
+    app: store
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+kind: ServiceExport
+apiVersion: net.gke.io/v1
+metadata:
+  name: store-east-1
+  namespace: store
+EOF
+kubectl apply -f store-east-service.yaml --context=gke-east-1
+```
+# Make sure that the service exports have been successfully created:
+```
+kubectl get serviceexports --context gke-west-2 --namespace store
+kubectl get serviceexports --context gke-east-1 --namespace store
+```
+# Task 6. Deploy the Gateway and HTTPRoutes
+Gateway and HTTPRoutes are resources deployed in the Config cluster, in gke-west-1 cluster.
+Platform administrators manage and deploy Gateways to centralize security policies such as TLS.
+Service Owners in different teams deploy HTTPRoutes in their own namespace so that they can independently control their routing logic.
+Roles for Gateway and HTTPRoutes diagram
+![image](https://github.com/Pruthvi360/GKE/assets/107435692/6692c971-00d6-4381-9f04-d396a2ec3288)
+
+# Deploy the Gateway in the gke-west-1 config cluster:
+```
+cat <<EOF > external-http-gateway.yaml
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: store
+---
+kind: Gateway
+apiVersion: gateway.networking.k8s.io/v1beta1
+metadata:
+  name: external-http
+  namespace: store
+spec:
+  gatewayClassName: gke-l7-gxlb-mc
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      kinds:
+      - kind: HTTPRoute
+EOF
+kubectl apply -f external-http-gateway.yaml --context=gke-west-1
+```
+# Deploy the HTTPRoute in the gke-west-1 config cluster:
+```
+cat <<EOF > public-store-route.yaml
+kind: HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1beta1
+metadata:
+  name: public-store-route
+  namespace: store
+  labels:
+    gateway: external-http
+spec:
+  hostnames:
+  - "store.example.com"
+  parentRefs:
+  - name: external-http
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /west
+    backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store-west-2
+      port: 8080
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /east
+    backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store-east-1
+      port: 8080
+  - backendRefs:
+    - group: net.gke.io
+      kind: ServiceImport
+      name: store
+      port: 8080
+EOF
+kubectl apply -f public-store-route.yaml --context=gke-west-1
+```
+# Notice that we are sending the default requests to the closest backend defined by the default rule. In case that the path /west is in the request, the request is routed to the service in gke-west-2. If the request's path matches /east, the request is routed to the gke-east-1 cluster.
+
+# Routing architecture diagram
+![image](https://github.com/Pruthvi360/GKE/assets/107435692/b99e9675-c006-4556-ad3a-09091cda4376)
+
+# View the status of the Gateway that you just created in gke-west-1:
+```
+kubectl describe gateway external-http --context gke-west-1 --namespace store
+```
+# Get the external IP created by the Gateway:
+```
+EXTERNAL_IP=$(kubectl get gateway external-http -o=jsonpath="{.status.addresses[0].value}" --context gke-west-1 --namespace store)
+echo $EXTERNAL_IP
+```
+
+```
+while true; do curl -H "host: store.example.com" http://${EXTERNAL_IP}; done
+```
