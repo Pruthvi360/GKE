@@ -75,3 +75,84 @@ gcloud services enable mesh.googleapis.com
   --fleet_id $PROJECT_ID \
   --output_dir ./asm_output
 ```
+# Task 5. Install Anthos Service Mesh
+```
+./asmcli install \
+  --project_id $PROJECT_ID \
+  --cluster_name $CLUSTER_NAME \
+  --cluster_location $CLUSTER_ZONE \
+  --fleet_id $PROJECT_ID \
+  --output_dir ./asm_output \
+  --enable_all \
+  --option legacy-default-ingressgateway \
+  --ca mesh_ca \
+  --enable_gcp_components
+```
+# Install Ingress Gateway
+```
+GATEWAY_NS=istio-gateway
+kubectl create namespace $GATEWAY_NS
+```
+# Enable auto-injection on the gateway by applying a revision label on the gateway namespace. The revision label is used by the sidecar injector webhook to associate injected proxies with a particular control plane revision.
+```
+kubectl get deploy -n istio-system -l app=istiod -o \
+jsonpath={.items[*].metadata.labels.'istio\.io\/rev'}'{"\n"}'
+
+REVISION=$(kubectl get deploy -n istio-system -l app=istiod -o \
+jsonpath={.items[*].metadata.labels.'istio\.io\/rev'}'{"\n"}')
+
+kubectl label namespace $GATEWAY_NS \
+istio.io/rev=$REVISION --overwrite
+```
+# Change to the directory that you specified in --output_dir:
+```
+cd ~/asm_output
+kubectl apply -n $GATEWAY_NS \
+  -f samples/gateways/istio-ingressgateway
+```
+# Enable sidecar injection
+```
+kubectl label namespace default istio-injection-istio.io/rev=$REVISION --overwrite
+```
+# Task 6. Deploy Bookinfo, an Istio-enabled multi-service application
+**The microservices are**:
+
+**productpage:** calls the details and reviews microservices to populate the page.
+**details:** contains book information.
+**reviews:** contains book reviews. It also calls the ratings microservice.
+**ratings:** contains book ranking information that accompanies a book review.
+
+**There are 3 versions of the reviews microservice:**
+Reviews v1 doesn't call the ratings service.
+Reviews v2 calls the ratings service and displays each rating as 1 - 5 black stars.
+Reviews v3 calls the ratings service and displays each rating as 1 - 5 red stars.
+The end-to-end architecture of the application looks like this:
+**Bookinfo Architecture**
+![image](https://github.com/Pruthvi360/GKE/assets/107435692/812a8f26-f5f0-4885-adf6-046456a23695)
+
+# Deploy book info
+```
+cd istio-1.16.7-asm.0
+cat samples/bookinfo/platform/kube/bookinfo.yaml
+kubectl apply -f samples/bookinfo/platform/kube/bookinfo.yaml
+cat samples/bookinfo/networking/bookinfo-gateway.yaml
+kubectl apply -f samples/bookinfo/networking/bookinfo-gateway.yaml
+kubectl get services
+kubectl get pods
+```
+```
+kubectl exec -it $(kubectl get pod -l app=ratings \
+    -o jsonpath='{.items[0].metadata.name}') \
+    -c ratings -- curl productpage:9080/productpage | grep -o "<title>.*</title>"
+```
+```
+kubectl get gateway
+kubectl get svc istio-ingressgateway -n istio-system
+export GATEWAY_URL=[EXTERNAL-IP]
+curl -I http://${GATEWAY_URL}/productpage
+```
+# Generate a steady background load
+```
+sudo apt install siege
+siege http://${GATEWAY_URL}/productpage
+```
